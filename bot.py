@@ -18,13 +18,12 @@ def run_flask(): app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '8902742471:AAG6SWWBESpslnAyaiSx0T-wLzrd35xsvUM')
 MAIN_CHANNEL = '@vexronnews'
-ADMIN_ID = 8306639956
 DATA = "/tmp/konkurs_data.json"
 
 if os.path.exists(DATA):
     with open(DATA) as f: data = json.load(f)
 else:
-    data = {"contests": {}, "participants": {}, "winners": {}}
+    data = {"contests": {}, "participants": {}, "usernames": {}, "winners": {}, "messages": {}}
 
 def save():
     with open(DATA, 'w') as f: json.dump(data, f, ensure_ascii=False)
@@ -39,10 +38,58 @@ async def check_sub(uid, context, channel=None):
 
 async def check_bot_admin(context, channel):
     try:
-        bot_member = await context.bot.get_chat_member(channel, context.bot.id)
-        return bot_member.status in ['administrator', 'creator']
+        member = await context.bot.get_chat_member(channel, context.bot.id)
+        return member.status in ['administrator', 'creator']
     except:
         return False
+
+async def update_contest_message(context, contest_id):
+    """Konkurs xabarini yangilash - ishtirokchilar soni bilan"""
+    contest = data["contests"].get(contest_id)
+    if not contest:
+        return
+    
+    parts = data["participants"].get(contest_id, [])
+    limit = contest.get("limit", 0)
+    count = len(parts)
+    
+    bot_username = (await context.bot.get_me()).username
+    button_text = f"{contest.get('button_text', 'Qatnashish')} ({count})"
+    kb = [[InlineKeyboardButton(button_text, url=f"https://t.me/{bot_username}?start=join_{contest_id}")]]
+    
+    caption = f"""{contest['text']}
+
+━━━━━━━━━━━━━━━━━
+🏆 G'oliblar: {contest['winners']}
+⏰ Tugash: {contest.get('end_time', '')}
+👥 Ishtirokchilar: {count}/{limit if limit > 0 else '∞'}"""
+    
+    # Eski xabarni o'chirib, yangisini yuborish
+    old_msg = data.get("messages", {}).get(contest_id)
+    try:
+        if old_msg:
+            chat_id = old_msg.get("chat_id")
+            msg_id = old_msg.get("message_id")
+            try:
+                await context.bot.delete_message(chat_id, msg_id)
+            except:
+                pass
+    except:
+        pass
+    
+    try:
+        if contest.get('image'):
+            msg = await context.bot.send_photo(contest['channel'], contest['image'], caption=caption, reply_markup=InlineKeyboardMarkup(kb))
+        else:
+            msg = await context.bot.send_message(contest['channel'], caption, reply_markup=InlineKeyboardMarkup(kb))
+        
+        data.setdefault("messages", {})[contest_id] = {
+            "chat_id": msg.chat_id,
+            "message_id": msg.message_id
+        }
+        save()
+    except:
+        pass
 
 def main_menu():
     return ReplyKeyboardMarkup([
@@ -59,55 +106,61 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     args = context.args
     
-    # Konkursdan kelgan bo'lsa (deep link)
+    # Deep link - konkursga qatnashish
     if args and args[0].startswith("join_"):
         contest_id = args[0].replace("join_", "")
+        contest = data.get("contests", {}).get(contest_id)
+        
+        if not contest:
+            await update.message.reply_text("❌ Konkurs topilmadi!")
+            return
         
         # Majburiy obunalarni tekshirish
-        contest = data.get("contests", {}).get(contest_id)
-        if contest:
-            channels_to_check = [MAIN_CHANNEL]
-            if contest.get("sub_channel"):
-                channels_to_check.append(contest["sub_channel"])
+        channels_to_check = [MAIN_CHANNEL]
+        if contest.get("sub_channel"):
+            channels_to_check.append(contest["sub_channel"])
+        
+        not_subscribed = []
+        for ch in channels_to_check:
+            if not await check_sub(uid, context, ch):
+                not_subscribed.append(ch)
+        
+        if not_subscribed:
+            kb = []
+            for ch in not_subscribed:
+                kb.append([InlineKeyboardButton(f"📢 {ch} ga obuna bo'lish", url=f"https://t.me/{ch[1:]}")])
+            kb.append([InlineKeyboardButton("✅ Obuna bo'ldim", callback_data=f"checksub_{contest_id}")])
             
-            not_subscribed = []
-            for ch in channels_to_check:
-                if not await check_sub(uid, context, ch):
-                    not_subscribed.append(ch)
-            
-            if not_subscribed:
-                kb = []
-                for ch in not_subscribed:
-                    kb.append([InlineKeyboardButton(f"📢 {ch} ga obuna bo'lish", url=f"https://t.me/{ch[1:]}")])
-                kb.append([InlineKeyboardButton("✅ Obuna bo'ldim", callback_data=f"checksub_{contest_id}")])
-                
-                channels_text = "\n".join(not_subscribed)
-                await update.message.reply_text(
-                    f"⚠️ Konkursda qatnashish uchun quyidagi kanallarga obuna bo'ling:\n\n{channels_text}",
-                    reply_markup=InlineKeyboardMarkup(kb)
-                )
-                return
-            
-            # Obuna bo'lgan - qatnashish
-            parts = data.get("participants", {}).get(contest_id, [])
-            limit = contest.get("limit", 0)
-            
-            if limit > 0 and len(parts) >= limit:
-                await update.message.reply_text("❌ Ishtirokchilar limiti to'lgan!")
-                return
-            
-            if str(uid) in parts:
-                await update.message.reply_text("⚠️ Siz allaqachon qatnashgansiz!")
-                return
-            
-            data.setdefault("participants", {}).setdefault(contest_id, []).append(str(uid))
-            save()
-            
+            channels_text = "\n".join(not_subscribed)
             await update.message.reply_text(
-                f"✅ Siz #{contest_id} konkursga muvaffaqiyatli qo'shildingiz!\n\n"
-                f"👥 Jami ishtirokchilar: {len(parts) + 1}"
+                f"⚠️ Konkursda qatnashish uchun obuna bo'ling:\n\n{channels_text}",
+                reply_markup=InlineKeyboardMarkup(kb)
             )
             return
+        
+        # Obuna bo'lgan - qatnashish
+        parts = data.get("participants", {}).get(contest_id, [])
+        limit = contest.get("limit", 0)
+        
+        if limit > 0 and len(parts) >= limit:
+            await update.message.reply_text("❌ Ishtirokchilar limiti to'lgan!")
+            return
+        
+        if str(uid) in parts:
+            await update.message.reply_text("⚠️ Siz allaqachon qatnashgansiz!")
+            return
+        
+        # Qo'shish
+        data.setdefault("participants", {}).setdefault(contest_id, []).append(str(uid))
+        username = update.effective_user.username or update.effective_user.first_name
+        data.setdefault("usernames", {}).setdefault(contest_id, {})[str(uid)] = username
+        save()
+        
+        await update.message.reply_text(f"✅ Siz konkursga qo'shildingiz!\n👥 Jami: {len(parts) + 1}")
+        
+        # Kanal xabarini yangilash
+        await update_contest_message(context, contest_id)
+        return
     
     # Oddiy start
     if not await check_sub(uid, context):
@@ -132,8 +185,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+    d = q.data
     
-    if q.data == "check_sub":
+    if d == "check_sub":
         if await check_sub(q.from_user.id, context):
             await q.delete_message()
             await start(update, context)
@@ -141,8 +195,14 @@ async def check_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await q.answer("❌ Hali obuna bo'lmadingiz!", show_alert=True)
         return
     
-    if q.data.startswith("checksub_"):
-        contest_id = q.data.replace("checksub_", "")
+    if d.startswith("checksub_"):
+        contest_id = d.replace("checksub_", "")
+        args = [f"join_{contest_id}"]
+        update.message.from_user = q.from_user
+        # Qayta start chaqirish
+        await q.delete_message()
+        # Deep link orqali qayta
+        context.args = args
         await start(update, context)
         return
 
@@ -158,7 +218,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Avval kanalga obuna bo'ling! /start")
         return
     
-    # KONKURS YARATISH
     if txt == "🎉 Konkurs yaratish":
         context.user_data['creating'] = True
         context.user_data['step'] = 'text'
@@ -181,11 +240,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not channel.startswith("@"):
             await update.message.reply_text("❌ @ bilan boshlanishi kerak!"); return
         
-        # Bot adminligini tekshirish
         if not await check_bot_admin(context, channel):
             await update.message.reply_text(
                 f"❌ Bot {channel} da admin emas!\n\n"
-                f"Avval botni kanalga ADMIN qiling, keyin qaytadan urinib ko'ring."
+                "Avval botni kanalga ADMIN qiling!"
             )
             return
         
@@ -220,7 +278,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Raqam kiriting!")
         return
     
-    # Faol konkurslar
     if txt == "📊 Faol konkurslar":
         contests = data.get("contests", {})
         active = {k: v for k, v in contests.items() if v.get("status") == "active"}
@@ -230,11 +287,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for cid, c in active.items():
             parts = data.get("participants", {}).get(cid, [])
             limit = c.get("limit", 0)
+            bot_username = (await context.bot.get_me()).username
             button_text = f"{c.get('button_text', 'Qatnashish')} ({len(parts)})"
             
-            kb = [[InlineKeyboardButton(button_text, url=f"https://t.me/{(await context.bot.get_me()).username}?start=join_{cid}")]]
+            kb = [[InlineKeyboardButton(button_text, url=f"https://t.me/{bot_username}?start=join_{cid}")]]
             
-            text = f"{c.get('text', '')}\n\n━━━━━━━━━━\n🏆 G'oliblar: {c.get('winners', 1)}\n👥 Ishtirokchilar: {len(parts)}/{limit if limit > 0 else '∞'}\n⏰ {c.get('end_time', '')}"
+            text = f"{c.get('text', '')}\n\n🏆 G'oliblar: {c.get('winners', 1)}\n👥 Ishtirokchilar: {len(parts)}/{limit if limit > 0 else '∞'}\n⏰ {c.get('end_time', '')}"
             
             try:
                 if c.get('image'):
@@ -310,7 +368,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if d == "sub_yes":
         context.user_data['step'] = 'sub_channel_input'
-        await q.edit_message_text("🔒 Qaysi kanalga obuna bo'lishi kerak?\n\nKanal username sini yozing:\nMasalan: @mychannel")
+        await q.edit_message_text("🔒 Qaysi kanalga obuna bo'lishi kerak?\n\nKanal username sini yozing:")
         return
     
     if d == "sub_no":
@@ -353,17 +411,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("❌ Ishtirokchilar yo'q!"); return
         
         winners_count = min(data["contests"][cid].get("winners", 1), len(parts))
-        winners = random.sample(parts, winners_count)
+        winner_ids = random.sample(parts, winners_count)
         
-        data.setdefault("winners", {})[cid] = winners
+        # Username larni olish
+        winner_names = []
+        for w in winner_ids:
+            name = data.get("usernames", {}).get(cid, {}).get(w, w)
+            winner_names.append(f"@{name}" if not name.startswith("@") else name)
+        
+        data.setdefault("winners", {})[cid] = winner_ids
         data["contests"][cid]["status"] = "finished"
         save()
         
         text = f"🎉 Konkurs #{cid} g'oliblari:\n\n"
-        for i, w in enumerate(winners, 1):
-            text += f"{i}. 👤 <code>{w}</code>\n"
+        for i, name in enumerate(winner_names, 1):
+            text += f"{i}. 👤 {name}\n"
         
-        await q.edit_message_text(text, parse_mode='HTML')
+        await q.edit_message_text(text)
         return
     
     if d.startswith("cancel_"):
@@ -399,6 +463,7 @@ async def publish_contest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data.setdefault("participants", {})[cid] = []
     save()
     
+    # Xabarni kanalga yuborish
     bot_username = (await context.bot.get_me()).username
     button_text = f"{contest['button_text']} (0)"
     kb = [[InlineKeyboardButton(button_text, url=f"https://t.me/{bot_username}?start=join_{cid}")]]
@@ -412,34 +477,21 @@ async def publish_contest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         if contest.get('image'):
-            await context.bot.send_photo(contest['channel'], contest['image'], caption=caption, reply_markup=InlineKeyboardMarkup(kb))
+            msg = await context.bot.send_photo(contest['channel'], contest['image'], caption=caption, reply_markup=InlineKeyboardMarkup(kb))
         else:
-            await context.bot.send_message(contest['channel'], caption, reply_markup=InlineKeyboardMarkup(kb))
+            msg = await context.bot.send_message(contest['channel'], caption, reply_markup=InlineKeyboardMarkup(kb))
+        
+        # Xabar ID sini saqlash
+        data.setdefault("messages", {})[cid] = {
+            "chat_id": msg.chat_id,
+            "message_id": msg.message_id
+        }
+        save()
         
         if update.callback_query:
-            await update.callback_query.edit_message_text(f"✅ Konkurs #{cid} yaratildi va {contest['channel']} ga yuborildi!")
+            await update.callback_query.edit_message_text(f"✅ Konkurs #{cid} yaratildi!")
         else:
-            await update.message.reply_text(f"✅ Konkurs #{cid} yaratildi va {contest['channel']} ga yuborildi!")
+            await update.message.reply_text(f"✅ Konkurs #{cid} yaratildi!")
     except Exception as e:
         if update.callback_query:
-            await update.callback_query.edit_message_text(f"❌ Xatolik! Bot {contest['channel']} da admin emas!")
-        else:
-            await update.message.reply_text(f"❌ Xatolik! Bot {contest['channel']} da admin emas!")
-    
-    context.user_data.clear()
-
-# ==================== MAIN ====================
-def main():
-    Thread(target=run_flask).start()
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    application.add_handler(CallbackQueryHandler(callback_handler))
-    
-    print("✅ Konkurs Bot ishga tushdi!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == "__main__":
-    main()
+            await update.callback_query.edit_message_text
