@@ -16,7 +16,7 @@ def home(): return "Konkurs Bot"
 def ping(): return "PONG"
 def run_flask(): app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
 
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '8902742471:AAG6SWWBESpslnAyaiSx0T-wLzrd35xsvUM')
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '8902742471:AAHcLMqSmKboNhVsjQw17WTdkxjNvGIluQs')
 MAIN_CHANNEL = '@vexronnews'
 ADMIN_ID = 8306639956
 DATA = "/tmp/konkurs_data.json"
